@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import asyncio
 import json
 import os
 import re
@@ -10,10 +11,7 @@ import paho.mqtt.client as mqtt
 import paho.mqtt.subscribe as subscribe
 
 
-# polling the devices is a blocking operation, so just set
-# the interval a bit shorter than 60 s to ensure we get at least
-# one sample a minute
-POLL_INTERVAL = 50.0
+POLL_INTERVAL = 30.0
 
 
 class DevicesNotFoundError(Exception):
@@ -29,20 +27,23 @@ def get_config():
     return host, port, user, password
 
 
+def set_target_temperature(device, payload):
+    temperature = float(payload)
+    device.set_temp(temperature)
+
+
+def set_thermostat_mode(device, payload):
+    power = {
+        "off": 0,
+        "heat": 1
+    }
+    device.set_power(power[payload])
+
+
 def get_device_id(device):
     dev_type = device.type
     dev_mac_str = ''.join('{:02x}'.format(x) for x in device.mac)
     return '{}_{}'.format(dev_type.lower().replace(' ', '_'), dev_mac_str)
-
-
-def get_devices(timeout=10):
-    all_devices = broadlink.discover(timeout=timeout)
-    hysen_devices = [dev for dev in all_devices 
-                     if isinstance(dev, broadlink.hysen)]
-
-    dev_dict = {get_device_id(device): device for device in hysen_devices}
-    
-    return dev_dict
 
 
 def publish_configuration(devices, mqtt_client):
@@ -108,13 +109,6 @@ def publish_available(devices, mqtt_client):
             availability_topic, availability_payload, retain=True)
 
 
-def set_device_wills(devices, mqtt_client):
-    for dev_id in devices:
-        will_topic = 'homeassistant/climate/{}/available'.format(dev_id)
-        will_payload = 'offline'
-        mqtt_client.will_set(will_topic, will_payload, retain=True)
-
-
 def subscribe_topics(devices, mqtt_client):
     topics = ["targetTempCmd", "thermostatModeCmd"]
     for dev_id in devices:
@@ -125,34 +119,80 @@ def subscribe_topics(devices, mqtt_client):
             mqtt_client.subscribe(full_topic, 0)
 
 
-def start_loop(devices, mqtt_client):
+async def set_time(device):
+    cur_time = time.localtime()
+    device.set_time(cur_time.tm_hour, cur_time.tm_min, cur_time.tm_sec,
+                    cur_time.tm_wday+1)
+
+
+async def set_time_coro(device):
+    while True:
+        sleep_future = asyncio.sleep(30*60)
+        await set_time(device)
+        await sleep_future
+
+
+async def get_devices(timeout=10):
+    all_devices = broadlink.discover(timeout=timeout)
+    hysen_devices = [dev for dev in all_devices 
+                     if isinstance(dev, broadlink.hysen)]
+
+    dev_dict = {get_device_id(device): device for device in hysen_devices}
+    
+    return dev_dict
+
+
+# FIXME: there is only one will per connection, so this will only result in
+#        one last will being set
+async def set_device_wills(devices, mqtt_client):
+    for dev_id in devices:
+        will_topic = 'homeassistant/climate/{}/available'.format(dev_id)
+        will_payload = 'offline'
+        mqtt_client.will_set(will_topic, will_payload, retain=True)
+
+
+async def publish_config_coro(devices, mqtt_client):
+    while True:
+        await asyncio.sleep(10*60)
+        publish_configuration(devices, mqtt_client)
+
+
+async def publish_available_coro(devices, mqtt_client):
+    while True:
+        await asyncio.sleep(10*60)
+        publish_available(devices, mqtt_client)
+
+
+async def publish_state_coro(dev_id, device, mqtt_client):
+    while True:
+        sleep_future = asyncio.sleep(POLL_INTERVAL)
+        publish_state(dev_id, device, mqtt_client)
+        await sleep_future
+
+
+async def start_tasks(devices, mqtt_client):
     mqtt_client.loop_start()
 
-    while True:
-        for dev_id, device in devices.items():
-            publish_state(dev_id, device, mqtt_client)
+    tasks = []
 
-            sleep_time = POLL_INTERVAL / len(devices)
-            time.sleep(sleep_time)
+    for dev_id, device in devices.items():
+        tasks.append(asyncio.create_task(
+            publish_config_coro(devices, mqtt_client)))
+        tasks.append(asyncio.create_task(
+            publish_available_coro(devices, mqtt_client)))
+        tasks.append(asyncio.create_task(
+            publish_state_coro(dev_id, device, mqtt_client)))
+        tasks.append(asyncio.create_task(
+            set_time_coro(device)))
 
-
-def set_target_temperature(device, payload):
-    temperature = float(payload)
-    device.set_temp(temperature)
-
-
-def set_thermostat_mode(device, payload):
-    power = {
-        "off": 0,
-        "heat": 1
-    }
-    device.set_power(power[payload])
+    for task in tasks:
+        await task
 
 
-def main():
+async def main():
     mqtt_host, mqtt_port, mqtt_user, mqtt_password = get_config()
 
-    devices = get_devices()
+    devices = await get_devices()
 
     for device in devices.values():
         device.auth()
@@ -186,14 +226,14 @@ def main():
 
     mqtt_client.on_message = on_message
 
-    set_device_wills(devices, mqtt_client)
+    await set_device_wills(devices, mqtt_client)
 
     mqtt_client.username_pw_set(mqtt_user, mqtt_password)
 
     mqtt_client.connect(mqtt_host, mqtt_port)
 
-    start_loop(devices, mqtt_client)
+    await start_tasks(devices, mqtt_client)
 
 
 if __name__ == '__main__':
-    main()
+    asyncio.run(main())
