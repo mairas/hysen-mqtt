@@ -5,6 +5,7 @@ import json
 import os
 import re
 import time
+import traceback
 
 import broadlink
 import paho.mqtt.client as mqtt
@@ -45,9 +46,13 @@ class HysenMQTTConnector:
 
     def _on_connect(self, client, userdata, flags, rc):
         print("Connected with result code {}".format(rc))
-        self.subscribe_topics()
-        self.publish_configuration()        
-        self.publish_available()
+        try:
+            self.subscribe_topics()
+            self.publish_configuration()
+            self.publish_available()
+            self.publish_state()
+        except Exception as err:
+            traceback.print_tb(err.__traceback__)
 
     def _on_message(self, client, userdata, message):
         payload = message.payload.decode('utf-8')
@@ -64,7 +69,10 @@ class HysenMQTTConnector:
 
         print("Calling handler for {}({})".format(command, payload))
         handlers[command](payload)
-        self.publish_state()
+        try:
+            self.publish_state()
+        except Exception as err:
+            traceback.print_tb(err.__traceback__)
 
     def set_target_temperature(self, payload):
         temperature = float(payload)
@@ -132,14 +140,14 @@ class HysenMQTTConnector:
             "current_temp": current_temp
         }
 
-        self._mqtt_client.publish(state_topic, json.dumps(state_payload))
+        self._mqtt_client.publish(state_topic, json.dumps(state_payload), qos=1)
 
     def publish_available(self):
         availability_topic = 'homeassistant/climate/{}/available'.format(
             self._device_id)
         availability_payload = 'online'
         self._mqtt_client.publish(
-            availability_topic, availability_payload, retain=True)
+            availability_topic, availability_payload, retain=True, qos=1)
 
     def subscribe_topics(self):
         topics = ["targetTempCmd", "thermostatModeCmd"]
@@ -160,7 +168,10 @@ class HysenMQTTConnector:
     async def set_time_coro(self):
         while True:
             sleep_future = asyncio.sleep(30*60)
-            await self.set_time()
+            try:
+                await self.set_time()
+            except Exception as err:
+                traceback.print_tb(err.__traceback__)
             await sleep_future
 
     def _set_last_will(self, client):
@@ -172,23 +183,31 @@ class HysenMQTTConnector:
     async def publish_config_coro(self):
         while True:
             await asyncio.sleep(10*60)
-            self.publish_configuration()
+            try:
+                self.publish_configuration()
+            except Exception as err:
+                traceback.print_tb(err.__traceback__)
 
     async def publish_available_coro(self):
         while True:
             await asyncio.sleep(10*60)
-            self.publish_available()
+            try:
+                self.publish_available()
+            except Exception as err:
+                traceback.print_tb(err.__traceback__)
 
     async def publish_state_coro(self):
         while True:
             sleep_future = asyncio.sleep(POLL_INTERVAL)
-            self.publish_state()
+            try:
+                self.publish_state()
+            except Exception as err:
+                traceback.print_tb(err.__traceback__)
             await sleep_future
 
     async def start_tasks(self):
         tasks = []
 
-        tasks.append(asyncio.create_task(self.publish_config_coro()))
         tasks.append(asyncio.create_task(self.publish_available_coro()))
         tasks.append(asyncio.create_task(self.publish_state_coro()))
         tasks.append(asyncio.create_task(self.set_time_coro()))
