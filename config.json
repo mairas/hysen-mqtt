@@ -1,20 +1,25 @@
 {
   "name": "Hysen MQTT Gateway",
   "version": "0.0.1",
-  "slug": "folder",
+  "slug": "hysen_mqtt",
   "description": "Expose Hysen wifi thermostats to Home Assistant as a MQTT client",
   "arch": ["armhf", "armv7", "aarch64", "amd64", "i386"],
   "url": "https://github.com/mairas/hysen-mqtt",
   "startup": "application",
   "boot": "auto",
-  "ports": {},
-  "map": [],
+  "host_network": true,
   "options": {
       "mqtt_host": "localhost",
       "mqtt_port": "1883",
-      "mqtt_user": "hysen-mqtt",
-      "mqtt_password": "hysen-mqtt-password"
+      "mqtt_user": "hysen",
+      "mqtt_password": "hysen-mqtt-password",
+      "local_ip_address": "192.168.1.100"
   },
-  "schema": {},
-  "image": "repo/{arch}-hysen-mqtt"
+  "schema": {
+      "mqtt_host": "str",
+      "mqtt_port": "int",
+      "mqtt_user": "str",
+      "mqtt_password": "str",
+      "local_ip_address": "str"
+  }
 }
