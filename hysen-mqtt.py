@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import os
 import re
 import time
@@ -14,6 +15,7 @@ import paho.mqtt.subscribe as subscribe
 
 POLL_INTERVAL = 30.0
 
+LOGGER = logging.getLogger(__name__)
 
 class DevicesNotFoundError(Exception):
     pass
@@ -25,7 +27,11 @@ def get_config():
     user = os.environ['MQTT_USER']
     password = os.environ['MQTT_PASSWORD']
 
-    return host, port, user, password
+    local_ip_address = os.environ['LOCAL_IP_ADDR'] \
+        if 'LOCAL_IP_ADDR' in os.environ and os.environ['LOCAL_IP_ADDR'] \
+        else None
+
+    return host, port, user, password, local_ip_address
 
 
 class HysenMQTTConnector:
@@ -45,7 +51,7 @@ class HysenMQTTConnector:
         return client
 
     def _on_connect(self, client, userdata, flags, rc):
-        print("Connected with result code {}".format(rc))
+        LOGGER.debug("Connected with result code %d", rc)
         try:
             self.subscribe_topics()
             self.publish_configuration()
@@ -67,7 +73,8 @@ class HysenMQTTConnector:
             "thermostatModeCmd": self.set_thermostat_mode
         }
 
-        print("Calling handler for {}({})".format(command, payload))
+        LOGGER.debug("Calling handler for %s: %s(%s)",
+                     self._device_id, command, payload)
         handlers[command](payload)
         try:
             self.publish_state()
@@ -76,6 +83,8 @@ class HysenMQTTConnector:
 
     def set_target_temperature(self, payload):
         temperature = float(payload)
+        LOGGER.debug("Setting %s target temperature to %f", 
+                     self._device_id, temperature)
         self._device.set_temp(temperature)
 
     def set_thermostat_mode(self, payload):
@@ -83,7 +92,35 @@ class HysenMQTTConnector:
             "off": 0,
             "heat": 1
         }
+        LOGGER.debug("Setting %s power mode to %f", 
+                self._device_id, payload)
         self._device.set_power(power[payload])
+
+    def set_time(self):
+        cur_time = time.localtime()
+        LOGGER.info('Setting %s time', self._device_id)
+        self._device.set_time(
+            cur_time.tm_hour, 
+            cur_time.tm_min, 
+            cur_time.tm_sec,
+            cur_time.tm_wday+1)
+
+    def set_deadzone(self, deadzone=1):
+        LOGGER.info('Setting %s deadzone', self._device_id)
+        status = self._device.get_full_status()
+        
+        loop_mode = status['loop_mode']
+        sensor = status['sensor']
+        osv = status['osv']
+        dif = deadzone
+        svh = status['svh']
+        svl = status['svl']
+        adj = status['room_temp_adj']
+        fre = status['fre']
+        poweron = status['poweron']
+
+        self._device.set_advanced(loop_mode, sensor, osv, dif, svh, svl,
+                                  adj, fre, poweron)
 
     def get_device_id(self):
         dev_type = self._device.type
@@ -115,6 +152,8 @@ class HysenMQTTConnector:
             "temp_stat_tpl": "{{ value_json.target_temp }}",
             "curr_temp_t": base + "/state",
             "curr_temp_tpl": "{{ value_json.current_temp }}",
+            "action_topic": base + "/state",
+            "action_template": "{{ value_json.action }}",
             "min_temp": "5",
             "max_temp": "35",
             "temp_step": "0.5",
@@ -122,7 +161,7 @@ class HysenMQTTConnector:
             "device": device_payload
         }
 
-        print('Publishing config: ', config_payload)
+        LOGGER.info('Publishing config for %s', self._device_id)
 
         self._mqtt_client.publish(config_topic, 
                                   json.dumps(config_payload), 
@@ -132,13 +171,20 @@ class HysenMQTTConnector:
         state_topic = 'homeassistant/climate/{}/state'.format(self._device_id)
         status = self._device.get_full_status()
         mode = "heat" if status["power"] else "off"
+        if mode == "off":
+            action = "off"
+        else:
+            action = "heating" if status["active"] else "idle"
         target_temp = str(status["thermostat_temp"])
         current_temp = str(status["external_temp"])
         state_payload = {
             "mode": mode,
             "target_temp": target_temp,
-            "current_temp": current_temp
+            "current_temp": current_temp,
+            "action": action,
         }
+
+        LOGGER.info('Publishing state for %s', self._device_id)
 
         self._mqtt_client.publish(state_topic, json.dumps(state_payload), qos=1)
 
@@ -146,6 +192,9 @@ class HysenMQTTConnector:
         availability_topic = 'homeassistant/climate/{}/available'.format(
             self._device_id)
         availability_payload = 'online'
+
+        LOGGER.info('Publishing availability for %s', self._device_id)
+
         self._mqtt_client.publish(
             availability_topic, availability_payload, retain=True, qos=1)
 
@@ -154,22 +203,15 @@ class HysenMQTTConnector:
         base = "homeassistant/climate/{}/".format(self._device_id)
         for topic in topics:
             full_topic = base + topic
-            print("Subscribing to {}".format(full_topic))
+            LOGGER.debug('Subscribing %s to %s', self._device_id, full_topic)
             self._mqtt_client.subscribe(full_topic, 0)
-
-    async def set_time(self):
-        cur_time = time.localtime()
-        self._device.set_time(
-            cur_time.tm_hour, 
-            cur_time.tm_min, 
-            cur_time.tm_sec,
-            cur_time.tm_wday+1)
 
     async def set_time_coro(self):
         while True:
             sleep_future = asyncio.sleep(30*60)
             try:
-                await self.set_time()
+                self.set_time()
+                self.set_deadzone()
             except Exception as err:
                 traceback.print_tb(err.__traceback__)
             await sleep_future
@@ -206,6 +248,8 @@ class HysenMQTTConnector:
             await sleep_future
 
     async def start_tasks(self):
+        LOGGER.info("Starting recurring background tasks for %s", 
+                    self._device_id)
         tasks = []
 
         tasks.append(asyncio.create_task(self.publish_available_coro()))
@@ -216,18 +260,27 @@ class HysenMQTTConnector:
             await task
 
 
-async def get_devices(timeout=10):
-    all_devices = broadlink.discover(timeout=timeout)
+async def get_devices(timeout=10, local_ip_address=None):
+    LOGGER.info("Discovering broadlink devices")
+    all_devices = broadlink.discover(
+        timeout=timeout, 
+        local_ip_address=local_ip_address)
     hysen_devices = [dev for dev in all_devices 
                      if isinstance(dev, broadlink.hysen)]
+    LOGGER.info("Found %d Hysen devices", len(hysen_devices))
 
     return hysen_devices
 
 
 async def main():
-    host, port, user, password= get_config()
+    LOGGER.setLevel(logging.DEBUG)
+    logging.basicConfig(
+        level=logging.DEBUG, 
+        format="%(asctime)s:%(name)s:%(levelname)s:%(message)s")
 
-    devices = await get_devices()
+    host, port, user, password, local_ip_address = get_config()
+
+    devices = await get_devices(local_ip_address=local_ip_address)
 
     connectors = []
     tasks = []
