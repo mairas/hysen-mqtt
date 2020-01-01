@@ -1,6 +1,6 @@
 {
   "name": "Hysen MQTT Gateway",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "slug": "hysen_mqtt",
   "description": "Expose Hysen wifi thermostats to Home Assistant as a MQTT client",
   "arch": ["armhf", "armv7", "aarch64", "amd64", "i386"],
